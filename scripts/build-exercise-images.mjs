@@ -1,0 +1,166 @@
+import { readFileSync, writeFileSync } from "fs";
+import { fileURLToPath } from "url";
+import { dirname, join } from "path";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+
+// App exercise name -> Simply Fitness page slug (when auto-match fails)
+const SLUG_OVERRIDES = {
+  "Bench Press": "barbell-bench-press",
+  "Pec Deck": "peck-deck",
+  Crossover: "cable-crossover",
+  "Incline Bench Press": "incline-barbell-bench-press",
+  "Chest Fly": "dumbbell-fly",
+  "Incline Chest Fly": "incline-dumbbell-fly",
+  "Chest Press Machine": "chest-press-machine",
+  "Declined Bench Press": "barbell-declined-bench-press",
+  "Chest dips": "bench-dips",
+  "Single-arm Seated Cable Row": "dumbbell-bent-over-row-single-arm",
+  "Bent over Rows": "dumbbell-bent-over-rows",
+  "Bent Over Rows Supinated Grip": "barbell-bent-over-rows-supinated-grip",
+  "Bent-Over Row (Single Arm)": "dumbbell-bent-over-row-single-arm",
+  Pullover: "dumbbell-pullover",
+  "Seated Shoulder Press": "seated-barbell-shoulder-press",
+  "Lateral Raise": "dumbbell-lateral-raise",
+  "One-Arm Lateral Raise": "cable-one-arm-lateral-raise",
+  "Front Raise": "dumbbell-front-raise",
+  "Reverse Pec Deck": "high-cable-rear-delt-fly",
+  "Upright Row": "barbell-upright-row",
+  "Standing Shoulder Press": "standing-barbell-shoulder-press",
+  "Push Press": "dumbbell-push-press",
+  "Single-Arm Front Raise": "single-arm-cable-front-raise",
+  "Alternate Dumbbell Front Raise": "alternate-dumbbell-front-raise-neutral-grip",
+  "Arnold Press": "dumbbell-shoulder-press",
+  Curl: "barbell-curl",
+  "Preacher Curl": "ez-barbell-preacher-curl",
+  "Incline Curl": "incline-dumbbell-curl",
+  "Concentration Curl": "dumbbell-concentration-curl",
+  "Rope Pushdown": "cable-rope-puschdown",
+  "Face Pull": "high-cable-rear-delt-fly",
+  "Single Leg Deadlift": "single-leg-bodyweight-deadlift",
+  "Overhead Triceps Extension": "dumbbell-overhead-triceps-extension",
+  "Reverse Grip Triceps Extension": "reverse-grip-cable-triceps-extension-with-barbell",
+  "Single-Arm Triceps Extension": "single-arm-cable-triceps-extension",
+  "Seated French Press": "seated-barbell-french-press",
+  "Bent Knee Reverse Crunches": "bent-knee-reverse-crunch",
+  Crunches: "crunch",
+  "Leg Raises": "hanging-leg-raise",
+  "Russian Twist": "oblique-crunch",
+  "Side Plank": "plank",
+  "Mountain Climbers": "burpees",
+  "Ab Wheel Rollout": "crunch",
+  "Romanian Deadlift": "barbell-stiff-leg-deadlift",
+  Deadlift: "barbell-deadlift",
+  "Cable Pull Through": "standing-cable-kickback",
+  "Step Ups": "dumbbell-step-up",
+  "Box Jumps": "jump-squat",
+  "Leg Press Calf Raise": "leg-press",
+  "Donkey Calf Raise": "seated-calf-raise",
+  "Single Leg Calf Raise": "standing-calf-raise",
+};
+
+function normalize(value) {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function slugToTitle(slug) {
+  return slug
+    .split("-")
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(" ");
+}
+
+const scraped = JSON.parse(
+  readFileSync(join(__dirname, "simply-fitness-slugs.json"), "utf8")
+);
+
+const byTitle = new Map();
+const bySlug = new Map();
+for (const [slug, data] of Object.entries(scraped)) {
+  bySlug.set(slug, data.imageUrl);
+  byTitle.set(normalize(data.title), data.imageUrl);
+  byTitle.set(normalize(slugToTitle(slug)), data.imageUrl);
+}
+
+const workoutDataPath = join(__dirname, "..", "lib", "workoutData.ts");
+const workoutData = readFileSync(workoutDataPath, "utf8");
+const muscleGroupsMatch = workoutData.match(
+  /export const MUSCLE_GROUPS[\s\S]*?\n\];/
+);
+if (!muscleGroupsMatch) {
+  throw new Error("Could not find MUSCLE_GROUPS in workoutData.ts");
+}
+const exerciseNames = [
+  ...muscleGroupsMatch[0].matchAll(/exercises:\s*\[([\s\S]*?)\]/g),
+].flatMap((block) =>
+  [...block[1].matchAll(/"([^"]+)"/g)].map((m) => m[1])
+);
+
+const images = {};
+const unmatched = [];
+
+for (const name of exerciseNames) {
+  if (name === "Custom Exercise") continue;
+
+  const overrideSlug = SLUG_OVERRIDES[name];
+  if (overrideSlug && bySlug.has(overrideSlug)) {
+    images[name] = bySlug.get(overrideSlug);
+    continue;
+  }
+
+  const normalized = normalize(name);
+  if (byTitle.has(normalized)) {
+    images[name] = byTitle.get(normalized);
+    continue;
+  }
+
+  const slugGuess = normalized.replace(/\s+/g, "-");
+  if (bySlug.has(slugGuess)) {
+    images[name] = bySlug.get(slugGuess);
+    continue;
+  }
+
+  // Partial match on Simply titles
+  let found = null;
+  for (const [title, url] of byTitle.entries()) {
+    if (title.includes(normalized) || normalized.includes(title)) {
+      found = url;
+      break;
+    }
+  }
+  if (found) {
+    images[name] = found;
+    continue;
+  }
+
+  unmatched.push(name);
+}
+
+const outPath = join(__dirname, "..", "lib", "exerciseImages.ts");
+const lines = [
+  "// Image URLs from Simply Fitness exercise guides (https://www.simplyfitness.com/pages/workout-exercise-guides)",
+  "// Generated by scripts/build-exercise-images.mjs — re-run after updating MUSCLE_GROUPS or scraping.",
+  "",
+  "export const EXERCISE_IMAGE_URLS: Record<string, string> = {",
+];
+
+for (const [name, url] of Object.entries(images).sort(([a], [b]) => a.localeCompare(b))) {
+  lines.push(`  ${JSON.stringify(name)}: ${JSON.stringify(url)},`);
+}
+
+lines.push("};", "");
+lines.push(
+  "export function getExerciseImageUrl(exerciseName: string): string | undefined {",
+  "  return EXERCISE_IMAGE_URLS[exerciseName];",
+  "}",
+  ""
+);
+
+writeFileSync(outPath, lines.join("\n"), "utf8");
+console.log(`Wrote ${Object.keys(images).length} mappings to ${outPath}`);
+if (unmatched.length) {
+  console.warn("Unmatched exercises:", unmatched.join(", "));
+}
